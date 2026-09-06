@@ -192,6 +192,7 @@ pub struct PayrollRunDraft {
     pub period_label: Symbol,
     pub state: RunDraftState,
     pub amendment_count: u32,
+    pub updated_at: u64,
 }
 
 // ?? Reviewer Authorization & Run Review ?????????????????????????????????????
@@ -2766,6 +2767,7 @@ impl Payroll {
             period_label: period_label.clone(),
             state: RunDraftState::Pending,
             amendment_count: 0,
+            updated_at: e.ledger().timestamp(),
         };
         e.storage()
             .persistent()
@@ -2815,6 +2817,7 @@ impl Payroll {
         draft.total_amount = new_total_amount;
         draft.employee_count = new_employee_count;
         draft.amendment_count += 1;
+        draft.updated_at = e.ledger().timestamp();
         e.storage()
             .persistent()
             .set(&DataKey::RunDraft(draft_id), &draft);
@@ -2938,6 +2941,16 @@ impl Payroll {
             .persistent()
             .get(&DataKey::RunDraft(draft_id))
             .expect("Draft not found")
+    }
+
+    /// Retrieve the last-updated timestamp for a payroll run draft (Issue #439).
+    pub fn get_draft_updated_at(e: Env, draft_id: u64) -> u64 {
+        let draft: PayrollRunDraft = e
+            .storage()
+            .persistent()
+            .get(&DataKey::RunDraft(draft_id))
+            .expect("Draft not found");
+        draft.updated_at
     }
 
     /// Return whether a draft transition is allowed by the draft state machine.
