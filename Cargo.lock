@@ -1656,7 +1656,7 @@ dependencies = [
  "proof_verifier",
  "salary_commitment",
  "soroban-sdk",
- "stellar-strkey 0.0.8",
+ "stellar-strkey 0.0.16",
  "token",
 ]
 
@@ -1921,7 +1921,7 @@ dependencies = [
  "proof_verifier",
  "salary_commitment",
  "soroban-sdk",
- "stellar-strkey 0.0.8",
+ "stellar-strkey 0.0.16",
  "token",
 ]
 
@@ -3097,7 +3097,7 @@ dependencies = [
  "proof_verifier",
  "salary_commitment",
  "soroban-sdk",
- "stellar-strkey 0.0.8",
+ "stellar-strkey 0.0.16",
  "token",
 ]
 
@@ -4233,7 +4233,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "stellar-strkey 0.0.8",
+ "stellar-strkey 0.0.16",
  "stellar-xdr 21.2.0",
 ]
 
