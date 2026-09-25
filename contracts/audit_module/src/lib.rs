@@ -209,7 +209,8 @@ impl AuditModule {
             .persistent()
             .set(&DataKey::AuditorKey(auditor.clone()), &record);
 
-        payroll_events::emit_view_key_generated(&env, auditor, expiration_ledger);
+        payroll_events::emit_view_key_generated(&env, auditor.clone(), expiration_ledger);
+        payroll_events::emit_indexer_audit_grant(&env, auditor, expiration_ledger);
 
         key_bytes
     }

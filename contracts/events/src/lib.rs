@@ -23,7 +23,11 @@
 //! predate this module may use other conventions and are preserved for
 //! backward compatibility.
 
-use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol};
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{symbol_short, Address, Bytes, BytesN, Env, Symbol};
+
+/// Version of the privacy-safe event stream consumed by indexers.
+pub const PRIVACY_SAFE_EVENT_SCHEMA_VERSION: u32 = 2;
 
 /// Pause category symbols for event emission.
 /// Defined here to avoid circular dependency with pause_manager.
@@ -52,6 +56,126 @@ mod pause_category_symbols {
 /// Returns the "payroll" domain topic used by the Payroll contract.
 pub fn payroll_topic() -> Symbol {
     symbol_short!("payroll")
+}
+
+fn hash_bytes(e: &Env, bytes: &Bytes) -> BytesN<32> {
+    e.crypto().sha256(bytes).into()
+}
+
+fn hash_address(e: &Env, address: &Address) -> BytesN<32> {
+    hash_bytes(e, &address.to_xdr(e))
+}
+
+fn hash_u64(e: &Env, value: u64) -> BytesN<32> {
+    hash_bytes(e, &Bytes::from_slice(e, &value.to_be_bytes()))
+}
+
+/// Emit the normalized, privacy-safe lifecycle event used by indexers.
+///
+/// Topics are `(payroll, event_name, schema_version, entity_hash)` and the
+/// payload is `(count, reason_code)`. No salary amount, employee address, or
+/// raw payroll row is included; entity hashes are one-way identifiers.
+pub fn emit_privacy_safe_lifecycle_event(
+    e: &Env,
+    event_name: Symbol,
+    entity_hash: BytesN<32>,
+    count: u32,
+    reason_code: Symbol,
+) {
+    e.events().publish(
+        (
+            payroll_topic(),
+            event_name,
+            PRIVACY_SAFE_EVENT_SCHEMA_VERSION,
+            entity_hash,
+        ),
+        (count, reason_code),
+    );
+}
+
+/// Emit a normalized commitment update without exposing the employee address.
+pub fn emit_indexer_commitment(e: &Env, commitment: BytesN<32>) {
+    emit_privacy_safe_lifecycle_event(
+        e,
+        Symbol::new(e, "commitment"),
+        commitment,
+        1,
+        Symbol::new(e, "updated"),
+    );
+}
+
+/// Emit a normalized commitment lock/unlock event keyed by an address hash.
+pub fn emit_indexer_commitment_lock(e: &Env, employee: Address, locked: bool) {
+    emit_privacy_safe_lifecycle_event(
+        e,
+        Symbol::new(e, "lock"),
+        hash_address(e, &employee),
+        1,
+        if locked {
+            Symbol::new(e, "locked")
+        } else {
+            Symbol::new(e, "unlocked")
+        },
+    );
+}
+
+/// Emit a normalized execution event keyed by a payroll run hash.
+pub fn emit_indexer_execution(e: &Env, run_id: u64, employee_count: u32) {
+    emit_privacy_safe_lifecycle_event(
+        e,
+        Symbol::new(e, "execution"),
+        hash_u64(e, run_id),
+        employee_count,
+        Symbol::new(e, "executed"),
+    );
+}
+
+/// Emit a normalized settlement event keyed by a payroll run hash.
+pub fn emit_indexer_settlement(e: &Env, run_id: u64, reason_code: Symbol) {
+    emit_privacy_safe_lifecycle_event(
+        e,
+        Symbol::new(e, "settlement"),
+        hash_u64(e, run_id),
+        1,
+        reason_code,
+    );
+}
+
+/// Emit a normalized cancellation event keyed by a payroll run hash.
+pub fn emit_indexer_cancellation(e: &Env, run_id: u64, reason_code: Symbol) {
+    emit_privacy_safe_lifecycle_event(
+        e,
+        Symbol::new(e, "cancellation"),
+        hash_u64(e, run_id),
+        1,
+        reason_code,
+    );
+}
+
+/// Emit a normalized audit-grant event keyed by an auditor hash.
+pub fn emit_indexer_audit_grant(e: &Env, auditor: Address, expiration_ledger: u32) {
+    emit_privacy_safe_lifecycle_event(
+        e,
+        Symbol::new(e, "audit_grant"),
+        hash_address(e, &auditor),
+        expiration_ledger,
+        Symbol::new(e, "granted"),
+    );
+}
+
+/// Emit a normalized treasury-readiness event keyed by an asset hash.
+pub fn emit_indexer_treasury_readiness(e: &Env, asset: Address, ready: bool) {
+    emit_privacy_safe_lifecycle_event(
+        e,
+        Symbol::new(e, "treasury_readiness"),
+        hash_address(e, &asset),
+        if ready { 1 } else { 0 },
+        if ready {
+            Symbol::new(e, "ready")
+        } else {
+            Symbol::new(e, "not_ready")
+        },
+    );
 }
 
 // ?????????????????????????????????????????????????????????????????????????????
@@ -1086,4 +1210,73 @@ pub fn emit_employee_status_changed(
         ),
         (previous_status, new_status),
     );
+}
+
+#[cfg(test)]
+mod privacy_safe_schema_tests {
+    use super::{
+        emit_indexer_cancellation, emit_indexer_execution, emit_indexer_settlement,
+        PRIVACY_SAFE_EVENT_SCHEMA_VERSION,
+    };
+    use soroban_sdk::testutils::{Address as _, Events};
+    use soroban_sdk::xdr::{ContractEventBody, ScSymbol, ScVal};
+    use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
+
+    #[contract]
+    struct EventProbe;
+
+    #[contractimpl]
+    impl EventProbe {}
+
+    fn topic_symbol(event: &soroban_sdk::xdr::ContractEvent, index: usize) -> ScSymbol {
+        match &event.body {
+            ContractEventBody::V0(body) => {
+                ScSymbol::try_from(body.topics.get(index).unwrap().clone()).unwrap()
+            }
+        }
+    }
+
+    fn topic_version(event: &soroban_sdk::xdr::ContractEvent) -> u32 {
+        match &event.body {
+            ContractEventBody::V0(body) => match body.topics.get(2).unwrap() {
+                ScVal::U32(version) => *version,
+                other => panic!("unexpected schema version topic: {other:?}"),
+            },
+        }
+    }
+
+    #[test]
+    fn lifecycle_events_use_versioned_topics_and_preserve_order() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, EventProbe);
+
+        env.as_contract(&contract_id, || {
+            emit_indexer_execution(&env, 7, 3);
+            emit_indexer_settlement(&env, 7, Symbol::new(&env, "reconciled"));
+            emit_indexer_cancellation(&env, 8, Symbol::new(&env, "admin_requested"));
+        });
+
+        let all_events = env.events().all();
+        let events = all_events.events();
+        assert_eq!(events.len(), 3);
+
+        let execution = events.get(0).unwrap();
+        let settlement = events.get(1).unwrap();
+        let cancellation = events.get(2).unwrap();
+
+        assert_eq!(
+            topic_symbol(execution, 1),
+            ScSymbol::try_from("execution").unwrap()
+        );
+        assert_eq!(
+            topic_symbol(settlement, 1),
+            ScSymbol::try_from("settlement").unwrap()
+        );
+        assert_eq!(
+            topic_symbol(cancellation, 1),
+            ScSymbol::try_from("cancellation").unwrap()
+        );
+        assert_eq!(topic_version(execution), PRIVACY_SAFE_EVENT_SCHEMA_VERSION);
+        assert_eq!(topic_version(settlement), PRIVACY_SAFE_EVENT_SCHEMA_VERSION);
+    }
 }

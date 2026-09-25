@@ -1547,7 +1547,7 @@ impl Payroll {
             };
         let position = assets.first_index_of(asset.clone());
         if allowed && position.is_none() {
-            assets.push_back(asset);
+            assets.push_back(asset.clone());
         } else if !allowed {
             if let Some(index) = position {
                 assets.remove(index);
@@ -1556,6 +1556,7 @@ impl Payroll {
         e.storage()
             .persistent()
             .set(&DataKey::SupportedAssets, &assets);
+        payroll_events::emit_indexer_treasury_readiness(&e, asset, allowed);
     }
 
     /// Check if an asset token is allowlisted for payroll payouts.
@@ -2574,8 +2575,9 @@ impl Payroll {
         // Emit cancellation event with reason for audit trail
         e.events().publish(
             (symbol_short!("payroll"), Symbol::new(&e, "run_cancelled")),
-            (run_id, reason),
+            (run_id, reason.clone()),
         );
+        payroll_events::emit_indexer_cancellation(&e, run_id, reason);
     }
 
     /// Alias for cancel_payroll_run_with_reason
@@ -2756,6 +2758,7 @@ impl Payroll {
         Self::record_payroll_run_state(&e, run_id, PayrollRunState::ReconciliationRequired);
 
         payroll_events::emit_run_executed(&e, run_id, expected_total_spend);
+        payroll_events::emit_indexer_execution(&e, run_id, count);
 
         run_id
     }
@@ -2945,6 +2948,12 @@ impl Payroll {
             ),
             (run_id, status),
         );
+        let settlement_reason = match status {
+            ReconciliationStatus::Reconciled => Symbol::new(&e, "reconciled"),
+            ReconciliationStatus::Unreconciled => Symbol::new(&e, "unreconciled"),
+            ReconciliationStatus::Failed => Symbol::new(&e, "failed"),
+        };
+        payroll_events::emit_indexer_settlement(&e, run_id, settlement_reason);
     }
 
     /// Finalize a `Pending` draft, making it permanently immutable.

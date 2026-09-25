@@ -147,7 +147,8 @@ impl SalaryCommitmentContract {
         }
         env.storage().persistent().set(&key, &true);
 
-        payroll_events::emit_commitment_locked(&env, employee);
+        payroll_events::emit_commitment_locked(&env, employee.clone());
+        payroll_events::emit_indexer_commitment_lock(&env, employee, true);
     }
 
     /// Unlock an employee's commitment so it can be updated again.
@@ -161,7 +162,8 @@ impl SalaryCommitmentContract {
         }
         env.storage().persistent().remove(&key);
 
-        payroll_events::emit_commitment_unlocked(&env, employee);
+        payroll_events::emit_commitment_unlocked(&env, employee.clone());
+        payroll_events::emit_indexer_commitment_lock(&env, employee, false);
     }
 
     /// Check if an employee's commitment is currently locked.
@@ -211,7 +213,8 @@ impl SalaryCommitmentContract {
         env.storage().persistent().set(&key, &salary_commitment);
 
         // Emit CommitmentUpdated event so off-chain indexers track commitment history.
-        payroll_events::emit_commitment_stored(&env, employee, commitment);
+        payroll_events::emit_commitment_stored(&env, employee, commitment.clone());
+        payroll_events::emit_indexer_commitment(&env, commitment);
 
         salary_commitment
     }
@@ -259,7 +262,8 @@ impl SalaryCommitmentContract {
 
         env.storage().persistent().set(&key, &updated);
 
-        payroll_events::emit_commitment_stored(&env, employee, new_commitment);
+        payroll_events::emit_commitment_stored(&env, employee, new_commitment.clone());
+        payroll_events::emit_indexer_commitment(&env, new_commitment);
 
         updated
     }
@@ -307,6 +311,7 @@ impl SalaryCommitmentContract {
             existing.commitment,
             rotated.commitment.clone(),
         );
+        payroll_events::emit_indexer_commitment(&env, rotated.commitment.clone());
 
         rotated
     }
