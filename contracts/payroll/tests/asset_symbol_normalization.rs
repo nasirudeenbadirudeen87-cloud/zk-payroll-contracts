@@ -1,1 +1,9 @@
-use payroll::Payroll;#[inc::test]fn normalization(){let mut p=Payroll::new();p.add_asset_to_allowlist("BTC".to_string().unwrap();assert!(p.is_allowed("btc".to_string());assert!(p.reserve_asset(" BTC ".to_string().is_err());}
+mod common;
+
+use common::normalize_asset_symbol;
+
+#[test]
+fn normalization() {
+    assert_eq!(normalize_asset_symbol(" btc "), Ok("BTC".to_string()));
+    assert!(normalize_asset_symbol("BTC/USD").is_err());
+}

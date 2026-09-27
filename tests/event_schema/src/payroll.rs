@@ -605,6 +605,103 @@ fn case_draft_expired(env: &Env, cid: &Address, out: &mut SchemaMap) {
     );
 }
 
+fn case_run_expired(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let run_id: u64 = 27;
+    let expired_by = Address::generate(env);
+    env.as_contract(cid, || {
+        payroll_events::emit_run_expired(env, run_id, expired_by.clone());
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "run_expired"),
+        "payroll.run_expired topics changed"
+    );
+    let decoded: (u64, Address) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (run_id, expired_by),
+        "payroll.run_expired payload changed"
+    );
+    out.insert(
+        "payroll.run_expired".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("run_expired")],
+            data: vec![field("run_id", "u64"), field("expired_by", "Address")],
+        },
+    );
+}
+
+fn case_period_frozen(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let period_label = Symbol::new(env, "aug_2026");
+    let frozen_by = Address::generate(env);
+    let reason = Symbol::new(env, "finalized");
+    env.as_contract(cid, || {
+        payroll_events::emit_period_frozen(
+            env,
+            period_label.clone(),
+            frozen_by.clone(),
+            reason.clone(),
+        );
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "period_frozen"),
+        "payroll.period_frozen topics changed"
+    );
+    let decoded: (Symbol, Address, Symbol) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (period_label, frozen_by, reason),
+        "payroll.period_frozen payload changed"
+    );
+    out.insert(
+        "payroll.period_frozen".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("period_frozen")],
+            data: vec![
+                field("period_label", "Symbol"),
+                field("frozen_by", "Address"),
+                field("reason", "Symbol"),
+            ],
+        },
+    );
+}
+
+fn case_period_unfrozen(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let period_label = Symbol::new(env, "aug_2026");
+    let unfrozen_by = Address::generate(env);
+    env.as_contract(cid, || {
+        payroll_events::emit_period_unfrozen(env, period_label.clone(), unfrozen_by.clone());
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "period_unfrozen"),
+        "payroll.period_unfrozen topics changed"
+    );
+    let decoded: (Symbol, Address) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (period_label, unfrozen_by),
+        "payroll.period_unfrozen payload changed"
+    );
+    out.insert(
+        "payroll.period_unfrozen".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("period_unfrozen")],
+            data: vec![
+                field("period_label", "Symbol"),
+                field("unfrozen_by", "Address"),
+            ],
+        },
+    );
+}
+
 fn case_reconciliation_updated(env: &Env, cid: &Address, out: &mut SchemaMap) {
     let run_id: u64 = 27;
     let status = Symbol::new(env, "reconciled");
@@ -940,6 +1037,39 @@ fn case_run_changes_requested(env: &Env, cid: &Address, out: &mut SchemaMap) {
     );
 }
 
+fn case_reservation_created(env: &Env, cid: &Address, out: &mut SchemaMap) {
+    let asset = Address::generate(env);
+    let reserved_amount: i128 = 5_000;
+    let expires_at: u64 = 86_400;
+    env.as_contract(cid, || {
+        payroll_events::emit_reservation_created(env, asset.clone(), reserved_amount, expires_at);
+    });
+    let (_, topics, data) = last_event(env);
+    assert_eq!(
+        topics,
+        topic(env, "reservation_created"),
+        "payroll.reservation_created topics changed"
+    );
+    let decoded: (Address, i128, u64) = data.try_into_val(env).unwrap();
+    assert_eq!(
+        decoded,
+        (asset, reserved_amount, expires_at),
+        "payroll.reservation_created payload changed"
+    );
+    out.insert(
+        "payroll.reservation_created".to_string(),
+        EventSchema {
+            schema_version: 1,
+            topics: vec![sym("payroll"), sym("reservation_created")],
+            data: vec![
+                field("asset", "Address"),
+                field("reserved_amount", "i128"),
+                field("expires_at", "u64"),
+            ],
+        },
+    );
+}
+
 #[test]
 fn payroll_events_match_fixture() {
     let (env, cid) = new_env();
@@ -965,6 +1095,9 @@ fn payroll_events_match_fixture() {
     case_draft_submitted(&env, &cid, &mut observed);
     case_draft_cancelled(&env, &cid, &mut observed);
     case_draft_expired(&env, &cid, &mut observed);
+    case_run_expired(&env, &cid, &mut observed);
+    case_period_frozen(&env, &cid, &mut observed);
+    case_period_unfrozen(&env, &cid, &mut observed);
     case_reconciliation_updated(&env, &cid, &mut observed);
     case_admin_proposed(&env, &cid, &mut observed);
     case_admin_rotated(&env, &cid, &mut observed);
@@ -977,6 +1110,7 @@ fn payroll_events_match_fixture() {
     case_run_approved(&env, &cid, &mut observed);
     case_run_rejected(&env, &cid, &mut observed);
     case_run_changes_requested(&env, &cid, &mut observed);
+    case_reservation_created(&env, &cid, &mut observed);
 
     assert_matches_fixture(
         "payroll",

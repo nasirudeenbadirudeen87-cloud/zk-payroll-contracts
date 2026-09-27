@@ -1,5 +1,5 @@
 [package]
-name = "audit_module"
+name = "treasury_isolation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,8 +12,10 @@ doctest = false
 soroban-sdk = { workspace = true }
 payroll_events = { path = "../events" }
 pause_manager = { path = "../pause_manager", default-features = false }
-shared_errors = { path = "../shared_errors" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 pause_manager = { path = "../pause_manager", features = ["contract"] }
+
+[features]
+testutils = ["soroban-sdk/testutils"]
