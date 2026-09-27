@@ -1,8 +1,8 @@
 #![no_std]
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, BytesN,
-    Env, Symbol, Vec,
+    contract, contractimpl, contracttype, symbol_short, token as soroban_token, Address, Bytes,
+    BytesN, Env, Symbol, Vec,
 };
 
 use pause_manager::PauseManagerClient;
@@ -105,6 +105,19 @@ pub struct PayrollRun {
     pub reconciliation_status: ReconciliationStatus,
     /// Off-chain metadata hash (period, company, batch, commitments) (#177).
     pub metadata_hash: BytesN<32>,
+}
+
+/// Immutable result binding for a client-supplied idempotency key.
+///
+/// The payload hash makes a reused key safe to retry only when the request is
+/// byte-for-byte equivalent. A key reused with different payroll data is
+/// rejected instead of silently returning another run's result.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PayrollExecutionIdempotencyRecord {
+    pub run_id: u64,
+    pub payload_hash: BytesN<32>,
+    pub created_at: u64,
 }
 
 /// Pending emergency withdrawal request (issue #104).
@@ -731,6 +744,8 @@ pub enum DataKey {
     PendingTreasuryRotation,
     /// Marks a run nonce as consumed. Value is the run_id that used it (#103).
     RunNonce(BytesN<32>),
+    /// Binds a client retry key to its immutable execution payload (#473).
+    PayrollExecutionIdempotency(BytesN<32>),
     /// Marks a deposit nonce as consumed to prevent replay (#191).
     DepositNonce(BytesN<32>),
     /// Pre-committed draft hash bound before execution (#102).
@@ -2846,6 +2861,121 @@ impl Payroll {
     /// Alias for cancel_payroll_run_with_reason
     pub fn cancel_payroll_run(e: Env, admin: Address, run_id: u64, reason: Symbol) {
         Self::cancel_payroll_run_with_reason(e, admin, run_id, reason);
+    }
+
+    /// Hash the complete payroll request used by the idempotent entrypoint.
+    ///
+    /// XDR is used for structured values and fixed-width big-endian encoding
+    /// for numeric values, making the binding deterministic without storing
+    /// employee addresses, amounts, or proofs in the idempotency record.
+    fn hash_payroll_execution_payload(
+        e: &Env,
+        proofs: &Vec<BytesN<256>>,
+        amounts: &Vec<i128>,
+        employees: &Vec<Address>,
+        expected_total_spend: i128,
+        nonce: &BytesN<32>,
+        draft_hash: &Option<BytesN<32>>,
+    ) -> BytesN<32> {
+        let mut payload = Bytes::new(e);
+        payload.extend_from_slice(&proofs.len().to_be_bytes());
+        for proof in proofs.iter() {
+            payload.append(&proof.to_xdr(e));
+        }
+        for amount in amounts.iter() {
+            payload.extend_from_slice(&amount.to_be_bytes());
+        }
+        for employee in employees.iter() {
+            payload.append(&employee.to_xdr(e));
+        }
+        payload.extend_from_slice(&expected_total_spend.to_be_bytes());
+        payload.append(&nonce.to_xdr(e));
+        match draft_hash {
+            Some(hash) => {
+                payload.extend_from_array(&[1u8]);
+                payload.append(&hash.to_xdr(e));
+            }
+            None => payload.extend_from_array(&[0u8]),
+        }
+        e.crypto().sha256(&payload).into()
+    }
+
+    /// Execute a payroll batch with a client-supplied idempotency key (#473).
+    ///
+    /// The first successful call stores only the key, a payload digest, and the
+    /// resulting run ID. Retrying the same request returns that run ID without
+    /// executing transfers again. Reusing the key with different request data
+    /// fails, and the existing payroll execution path retains responsibility
+    /// for all validation, authorization, and payment checks.
+    pub fn batch_process_payroll_idempotent(
+        e: Env,
+        idempotency_key: BytesN<32>,
+        proofs: Vec<BytesN<256>>,
+        amounts: Vec<i128>,
+        employees: Vec<Address>,
+        expected_total_spend: i128,
+        nonce: BytesN<32>,
+        draft_hash: Option<BytesN<32>>,
+    ) -> u64 {
+        Self::validate_non_zero_digest(&e, &idempotency_key, "idempotency_key");
+
+        let payload_hash = Self::hash_payroll_execution_payload(
+            &e,
+            &proofs,
+            &amounts,
+            &employees,
+            expected_total_spend,
+            &nonce,
+            &draft_hash,
+        );
+        let key = DataKey::PayrollExecutionIdempotency(idempotency_key);
+
+        if let Some(record) = e
+            .storage()
+            .persistent()
+            .get::<_, PayrollExecutionIdempotencyRecord>(&key)
+        {
+            if record.payload_hash != payload_hash {
+                panic!("Idempotency key payload mismatch");
+            }
+            let addrs: ContractAddresses = e
+                .storage()
+                .persistent()
+                .get(&DataKey::Addresses)
+                .expect("Not initialized");
+            addrs.admin.require_auth();
+            return record.run_id;
+        }
+
+        let run_id = Self::batch_process_payroll(
+            e.clone(),
+            proofs,
+            amounts,
+            employees,
+            expected_total_spend,
+            nonce,
+            draft_hash,
+        );
+        e.storage().persistent().set(
+            &key,
+            &PayrollExecutionIdempotencyRecord {
+                run_id,
+                payload_hash,
+                created_at: e.ledger().timestamp(),
+            },
+        );
+        run_id
+    }
+
+    /// Look up the stored result for an idempotency key without exposing the
+    /// original payroll payload.
+    pub fn get_idempotency_record(
+        e: Env,
+        idempotency_key: BytesN<32>,
+    ) -> Option<PayrollExecutionIdempotencyRecord> {
+        e.storage()
+            .persistent()
+            .get(&DataKey::PayrollExecutionIdempotency(idempotency_key))
     }
 
     pub fn batch_process_payroll(
@@ -6610,6 +6740,72 @@ mod tests {
             &amounts2,
             &employees2,
             &1000,
+            &nonce,
+            &None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn idempotent_retry_returns_original_run_without_duplicate_execution() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let idempotency_key = test_nonce(&env, 120);
+        let nonce = test_nonce(&env, 121);
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        let first = payroll_client.batch_process_payroll_idempotent(
+            &idempotency_key,
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &nonce,
+            &None,
+        );
+        let retry = payroll_client.batch_process_payroll_idempotent(
+            &idempotency_key,
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &nonce,
+            &None,
+        );
+
+        assert_eq!(first, retry);
+        let record = payroll_client
+            .get_idempotency_record(&idempotency_key)
+            .expect("idempotency record should persist");
+        assert_eq!(record.run_id, first);
+    }
+
+    #[test]
+    fn idempotency_key_rejects_changed_payload() {
+        let env = Env::default();
+        let (payroll_client, _admin, _treasury, _treasury_owner, employee) =
+            setup_simple_payroll(&env);
+
+        let idempotency_key = test_nonce(&env, 122);
+        let nonce = test_nonce(&env, 123);
+        let (proofs, amounts, employees) = single_payment_batch(&env, &employee, 1000);
+        payroll_client.batch_process_payroll_idempotent(
+            &idempotency_key,
+            &proofs,
+            &amounts,
+            &employees,
+            &1000,
+            &nonce,
+            &None,
+        );
+
+        let result = payroll_client.try_batch_process_payroll_idempotent(
+            &idempotency_key,
+            &proofs,
+            &amounts,
+            &employees,
+            &999,
             &nonce,
             &None,
         );
